@@ -1,73 +1,162 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Three.js GLB Viewer</title>
-    <style>
-        body { margin: 0; overflow: hidden; }
-        canvas { display: block; }
-    </style>
+  <meta charset="UTF-8" />
+  <title>Robot Scroll + HDRI + Film Grain</title>
+  <style>
+    body {
+      margin: 0;
+      height: 5000px;
+      background: #E8E8E8;
+      overflow-x: hidden;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: transparent;
+    }
+  </style>
 </head>
 <body>
-<script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js';
-import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/loaders/GLTFLoader.js';
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r126/three.min.js"></script>
+<script src="https://unpkg.com/three@0.126.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://unpkg.com/three@0.126.0/examples/js/loaders/RGBELoader.js"></script>
+<script src="https://unpkg.com/three@0.126.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://unpkg.com/three@0.126.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://unpkg.com/three@0.126.0/examples/js/postprocessing/ShaderPass.js"></script>
 
-// Сцена
+<script>
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xaaaaaa);
 
-// Камера
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.set(3, 3, 3);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(0, 1, 3);
 
-// Рендерер
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 2.0;
 document.body.appendChild(renderer.domElement);
 
-// Контролы
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1, 0);
-controls.update();
+// PMREM для HDRI
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+
+new THREE.RGBELoader()
+  .setDataType(THREE.UnsignedByteType)
+  .load("photo_studio_01_4k.hdr", (texture)=>{
+    const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+    scene.environment = envMap;
+    texture.dispose();
+    pmremGenerator.dispose();
+  });
 
 // Свет
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
+const fillLight = new THREE.DirectionalLight(0xffffff, 0.8);
+fillLight.position.set(5,5,5);
+scene.add(fillLight);
 
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(5, 10, 7.5);
-scene.add(directionalLight);
+const container = new THREE.Group();
+scene.add(container);
+
+const baseRotation = new THREE.Euler(0, -0.6, 0);
+container.rotation.copy(baseRotation);
+
+const mixers = [];
+let scrollY = 0;
+let scrollTarget = 0;
+
+window.addEventListener("scroll", () => { scrollTarget = window.scrollY; });
 
 // Загрузка модели с Dropbox
-const loader = new GLTFLoader();
-loader.load(
-    'https://www.dropbox.com/s/dz3hkwjcbhcfh755t8woq/model.glb?dl=1',
-    (gltf) => {
-        scene.add(gltf.scene);
-    },
-    (xhr) => {
-        console.log((xhr.loaded / xhr.total * 100) + '% loaded');
-    },
-    (error) => {
-        console.error('Ошибка загрузки модели', error);
-    }
-);
+const loader = new THREE.GLTFLoader();
+loader.load("https://www.dropbox.com/s/dz3hkwjcbhcfh755t8woq/model.glb?dl=1", (gltf)=>{
+  const model = gltf.scene;
 
-// Анимация
-function animate() {
-    requestAnimationFrame(animate);
-    renderer.render(scene, camera);
+  model.traverse((child)=>{
+    if(child.isMesh && child.material && child.material.isMeshStandardMaterial){
+      child.material.roughness = 0.8;
+      child.material.metalness = 1.4;
+      child.material.needsUpdate = true;
+    }
+  });
+
+  container.add(model);
+  model.position.set(-1,0,0);
+
+  if(gltf.animations.length > 0){
+    const mixer = new THREE.AnimationMixer(model);
+    gltf.animations.forEach((clip)=>mixer.clipAction(clip).play());
+    mixers.push(mixer);
+  }
+}, undefined, (error)=>{console.error("Ошибка загрузки модели:", error);});
+
+// Поворот мышью
+let mouseX = 0, mouseY = 0;
+document.addEventListener("mousemove", (event)=>{
+  mouseX = (event.clientX / window.innerWidth - 0.5)*2;
+  mouseY = (event.clientY / window.innerHeight - 0.5)*2;
+});
+
+// POSTPROCESSING для шума
+const composer = new THREE.EffectComposer(renderer);
+const renderPass = new THREE.RenderPass(scene,camera);
+composer.addPass(renderPass);
+
+const NoiseShader = {
+  uniforms: {
+    "tDiffuse": {value:null},
+    "time": {value:0.0},
+    "amount": {value:0.3}
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform float amount;
+    varying vec2 vUv;
+    float rand(vec2 co){ return fract(sin(dot(co.xy,vec2(12.9898,78.233)))*43758.5453); }
+    void main(){
+      vec4 color = texture2D(tDiffuse,vUv);
+      float grain = (rand(vUv + time*0.05)-0.5)*amount;
+      gl_FragColor = vec4(color.rgb + grain, color.a);
+    }
+  `
+};
+
+const noisePass = new THREE.ShaderPass(NoiseShader);
+composer.addPass(noisePass);
+
+function animate(t){
+  requestAnimationFrame(animate);
+
+  scrollY += (scrollTarget - scrollY)*0.05;
+
+  if(mixers.length>0 && mixers[0]._actions.length>0){
+    const clip = mixers[0]._actions[0].getClip();
+    const duration = clip.duration;
+    mixers[0].setTime((scrollY*0.001)%duration);
+  }
+
+  const maxAngle = 0.35;
+  container.rotation.y = baseRotation.y + mouseX*maxAngle;
+  container.rotation.x = baseRotation.x + -mouseY*maxAngle;
+
+  noisePass.uniforms.time.value = t*0.001;
+  composer.render();
 }
 animate();
 
-// Подгон под размер окна
-window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+window.addEventListener("resize",()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 </script>
 </body>
